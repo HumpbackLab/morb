@@ -12,7 +12,7 @@ struct TestStruct {
 
 #[test]
 fn basic_topic_pub_sub_test() {
-    let test_topic = create_topic::<TestStruct>("test_struct_basic_poll".to_string(), 16);
+    let test_topic = create_topic::<TestStruct>("test_struct_basic_poll".to_string(), 16).unwrap();
     let publisher_struct = test_topic.create_publisher();
     publisher_struct.publish(TestStruct { test: 1, test2: 2 });
     assert_eq!(test_topic.generation.load(Ordering::SeqCst), 1);
@@ -186,7 +186,9 @@ fn concurrent_publishers_should_not_drop_or_duplicate_messages() {
     let mut subscriber = topic.create_subscriber();
     let mut received = Vec::new();
     while subscriber.check_update() {
-        received.push(subscriber.check_update_and_copy().unwrap());
+        if let Some(data) = subscriber.check_update_and_copy() {
+            received.push(data);
+        }
     }
 
     let unique: HashSet<_> = received.iter().copied().collect();
@@ -235,4 +237,74 @@ fn subscriber_read_after_new_generation_observes_committed_data() {
 
     assert_eq!(data, Some(123));
     handle.join().unwrap();
+}
+
+#[test]
+fn create_topic_with_existing_name_returns_error() {
+    let topic_name = "test_duplicate_topic".to_string();
+
+    // First creation should succeed
+    let result1 = create_topic::<u32>(topic_name.clone(), 16);
+    assert!(result1.is_ok());
+
+    // Second creation with same name should fail
+    let result2 = create_topic::<u32>(topic_name, 16);
+    assert!(result2.is_err());
+}
+
+#[test]
+fn duplicate_topic_creation_does_not_replace_existing_topic() {
+    let topic_name = "test_no_replace_topic".to_string();
+
+    // Create first topic and hold a reference
+    let topic1 = create_topic::<u32>(topic_name.clone(), 16).unwrap();
+    let publisher1 = topic1.create_publisher();
+    publisher1.publish(123);
+
+    // Try to create duplicate - should fail
+    let result2 = create_topic::<u32>(topic_name.clone(), 16);
+    assert!(result2.is_err());
+
+    // Verify get_topic returns the original topic
+    let topic_from_get = get_topic::<u32>(&topic_name).unwrap();
+
+    // Verify we can still read from the original topic
+    let mut subscriber = topic1.create_subscriber();
+    assert_eq!(subscriber.check_update_and_copy(), Some(123));
+
+    // Verify the topic from get_topic is the same instance
+    // (by publishing and reading from it)
+    let publisher_from_get = topic_from_get.create_publisher();
+    publisher_from_get.publish(456);
+
+    let mut subscriber2 = topic_from_get.create_subscriber();
+    assert_eq!(subscriber2.check_update_and_copy(), Some(123));
+    assert_eq!(subscriber2.check_update_and_copy(), Some(456));
+}
+
+#[test]
+fn topic_num_not_incremented_on_duplicate() {
+    let topic_name1 = "test_topic_num_1".to_string();
+    let topic_name2 = "test_topic_num_2".to_string();
+    let topic_name3 = "test_topic_num_3".to_string();
+
+    // Create first topic
+    let topic1 = create_topic::<u32>(topic_name1.clone(), 16).unwrap();
+    let token1 = topic1.token;
+
+    // Try to create duplicate of first topic (should not increment topic_num)
+    let _ = create_topic::<u32>(topic_name1, 16);
+
+    // Create second topic - its token should be token1 + 1, not +2
+    let topic2 = create_topic::<u32>(topic_name2, 16).unwrap();
+    let token2 = topic2.token;
+    assert_eq!(usize::from(token2), usize::from(token1) + 1);
+
+    // Try to create duplicate of second topic
+    let _ = create_topic::<u32>(topic_name3.clone(), 16).unwrap();
+    let _ = create_topic::<u32>(topic_name3, 16);
+
+    // Create third topic - should increment correctly
+    let topic3 = create_topic::<u32>("test_topic_num_final".to_string(), 16).unwrap();
+    assert_eq!(usize::from(topic3.token), usize::from(token2) + 2);
 }

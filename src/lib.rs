@@ -18,7 +18,7 @@ pub struct TopicManager {
 static TOPIC_MANAGER: LazyLock<Arc<RwLock<TopicManager>>> =
     LazyLock::new(|| Arc::new(RwLock::new(TopicManager::new())));
 
-pub fn create_topic<T: MorbDataType>(name: String, queue_size: u16) -> Arc<Topic<T>> {
+pub fn create_topic<T: MorbDataType>(name: String, queue_size: u16) -> Result<Arc<Topic<T>>,()> {
     TOPIC_MANAGER
         .write()
         .unwrap()
@@ -41,11 +41,14 @@ impl TopicManager {
         &mut self,
         name: String,
         queue_size: u16,
-    ) -> Arc<Topic<T>> {
+    ) -> Result<Arc<Topic<T>>,()> {
+        if self.topics.contains_key(&name) {
+            return Err(());
+        }
         self.topic_num += 1;
         let topic = Arc::new(Topic::new(name.clone(), queue_size, self.topic_num));
-        assert!(self.topics.insert(name, Box::new(topic.clone())).is_none(), "topic with the same name already exists");
-        topic
+        self.topics.insert(name, Box::new(topic.clone()));
+        Ok(topic)
     }
 
     pub fn get_topic<T: MorbDataType>(&self, name: &str) -> Option<Arc<Topic<T>>> {
