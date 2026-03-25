@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mio = "1.1.1"
+libc = "0.2.183"
+mio = {version = "1.1.1",features = ["os-poll","os-ext"] }

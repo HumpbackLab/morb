@@ -1,6 +1,11 @@
 use std::collections::HashMap;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::time::Duration;
+
+use mio::{Events, Poll, Token};
+use mio::event::Source;
 
 pub trait MorbDataType: Send + Sync + 'static + Clone {}
 impl<T> MorbDataType for T where T: Send + Sync + 'static + Clone {}
@@ -39,8 +44,6 @@ impl TopicManager {
     ) -> Arc<Topic<T>> {
         self.topic_num += 1;
         let topic = Arc::new(Topic::new(name.clone(), queue_size, self.topic_num));
-        // use topic_num as topic_id, start from 1
-
         self.topics.insert(name, Box::new(topic.clone()));
         topic
     }
@@ -62,12 +65,7 @@ impl<T: MorbDataType> Publisher<T> {
             % (self.topic.queue_size as usize);
         self.topic.fifo.lock().unwrap()[index] = Some(data);
         self.topic.generation.fetch_add(1, Ordering::SeqCst);
-        // Notify subscribers in wait_list
-        // while let Some(subscriber_id) = self.topic.wait_list.pop() {
-        //     // Here you would notify the subscriber with the new data
-        //     // This is a placeholder for the actual notification logic
-        //     println!("Notifying subscriber {} of new data", subscriber_id);
-        // }
+        self.topic.notify();
     }
 }
 
@@ -95,25 +93,82 @@ impl<T: MorbDataType> Subscriber<T> {
     }
 }
 
+pub struct TopicPoller {
+    poll: Poll,
+    events: Events,
+}
+
+impl TopicPoller {
+    pub fn new() -> Self {
+        Self {
+            poll: Poll::new().unwrap(),
+            events: Events::with_capacity(1024),
+        }
+    }
+
+    pub fn add_topic<T: MorbDataType>(&mut self, topic: &Topic<T>) -> std::io::Result<()> {
+        mio::unix::SourceFd(&topic.eventfd.as_raw_fd()).register(
+            self.poll.registry(),
+            topic.token,
+            mio::Interest::READABLE,
+        )
+    }
+
+    pub fn remove_topic<T: MorbDataType>(&mut self, topic: &Topic<T>) -> std::io::Result<()> {
+        mio::unix::SourceFd(&topic.eventfd.as_raw_fd()).deregister(
+            self.poll.registry(),
+        )
+    }
+
+    pub fn wait(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.poll.poll(&mut self.events, timeout)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Token> + '_ {
+        self.events.iter().map(|event| event.token())
+    }
+}
+
 pub struct Topic<T: MorbDataType> {
     name: String,
     fifo: Mutex<Vec<Option<T>>>,
     pub(crate) generation: AtomicU32,
-    wait_list: Vec<u64>,
     queue_size: u16,
-    topic_id: usize,
+    pub(crate) token: mio::Token,
+    eventfd: OwnedFd,
 }
 
 impl<T: MorbDataType> Topic<T> {
-    // use create_topic, this is private
     fn new(name: String, queue_size: u16, topic_id: usize) -> Self {
         Self {
             name,
             fifo: Mutex::new(vec![None; queue_size as usize]),
             generation: AtomicU32::new(0),
-            wait_list: Vec::new(),
             queue_size,
-            topic_id,
+            token: Token(topic_id),
+            eventfd: unsafe { OwnedFd::from_raw_fd(libc::eventfd(0, libc::EFD_NONBLOCK)) },
+        }
+    }
+
+    fn notify(&self) {
+        let value = usize::from(self.token);
+        unsafe {
+            libc::write(
+                self.eventfd.as_raw_fd(),
+                &value as *const usize as *const libc::c_void,
+                std::mem::size_of::<usize>(),
+            );
+        }
+    }
+
+    pub fn clear_event(&self) {
+        let mut value: usize = 0;
+        unsafe {
+            libc::read(
+                self.eventfd.as_raw_fd(),
+                &mut value as *mut usize as *mut libc::c_void,
+                std::mem::size_of::<usize>(),
+            );
         }
     }
 
@@ -134,21 +189,23 @@ impl<T: MorbDataType> Topic<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
-    #[derive(Clone)]
-    struct test_struct {
+    #[derive(Clone, Debug, PartialEq)]
+    struct TestStruct {
         test: u32,
         test2: u64,
     }
+
     #[test]
     fn basic_topic_pub_sub_test() {
-        let test_topic = create_topic::<test_struct>("test_struct_basic".to_string(), 16);
+        let test_topic = create_topic::<TestStruct>("test_struct_basic_poll".to_string(), 16);
         let publisher_struct = test_topic.create_publisher();
-        publisher_struct.publish(test_struct { test: 1, test2: 2 });
+        publisher_struct.publish(TestStruct { test: 1, test2: 2 });
         assert_eq!(test_topic.generation.load(Ordering::SeqCst), 1);
 
         let publisher = test_topic.create_publisher();
-        publisher.publish(test_struct {
+        publisher.publish(TestStruct {
             test: 42,
             test2: 43,
         });
@@ -175,5 +232,87 @@ mod tests {
         let topic: Topic<u16> = Topic::new("test".to_string(), 16, 1);
         assert_eq!(topic.name, "test");
         assert_eq!(topic.generation.load(Ordering::SeqCst), 0);
+        assert_eq!(topic.token, Token(1));
+    }
+
+    #[test]
+    fn topic_poller_add_topic_test() {
+        let mut poller = TopicPoller::new();
+        let topic: Topic<u32> = Topic::new("test_poll".to_string(), 16, 2);
+
+        let result = poller.add_topic(&topic);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn topic_poller_wait_test() {
+        let mut poller = TopicPoller::new();
+
+        // Add topic to poller - no need for mut anymore!
+        let reg_topic: Topic<u32> = Topic::new("test_wait".to_string(), 16, 3);
+        poller.add_topic(&reg_topic).unwrap();
+
+        // Wait with timeout should return Ok even with no events
+        let result = poller.wait(Some(Duration::from_millis(10)));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn topic_poller_notification_test() {
+        let mut poller = TopicPoller::new();
+
+        // Create a topic and wrap in Arc for sharing
+        let topic = Arc::new(Topic::new("test_notify".to_string(), 16, 4));
+
+        // Add topic to poller - no need for separate instance!
+        poller.add_topic(&topic).unwrap();
+
+        // Clone Arc for the thread
+        let topic_clone = topic.clone();
+
+        // Spawn a thread to publish after a short delay
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let publisher = topic_clone.create_publisher();
+            publisher.publish(42u32);
+        });
+
+        // Wait for notification with timeout
+        let result = poller.wait(Some(Duration::from_millis(200)));
+        assert!(result.is_ok());
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn topic_notify_and_clear_test() {
+        let topic: Topic<u32> = Topic::new("test_clear".to_string(), 16, 5);
+
+        // Notify
+        topic.notify();
+
+        // Clear the event
+        topic.clear_event();
+
+        // Create another notification
+        topic.notify();
+        topic.clear_event();
+    }
+
+    #[test]
+    fn topic_poller_iter_test() {
+        let mut poller = TopicPoller::new();
+        let topic1: Topic<u32> = Topic::new("test_iter1".to_string(), 16, 6);
+        let topic2: Topic<u32> = Topic::new("test_iter2".to_string(), 16, 7);
+
+        poller.add_topic(&topic1).unwrap();
+        poller.add_topic(&topic2).unwrap();
+
+        // Wait with timeout
+        poller.wait(Some(Duration::from_millis(10))).unwrap();
+
+        // Iterate over events (should be none in this case)
+        let tokens: Vec<Token> = poller.iter().collect();
+        assert!(tokens.is_empty());
     }
 }
