@@ -44,7 +44,7 @@ impl TopicManager {
     ) -> Arc<Topic<T>> {
         self.topic_num += 1;
         let topic = Arc::new(Topic::new(name.clone(), queue_size, self.topic_num));
-        self.topics.insert(name, Box::new(topic.clone()));
+        assert!(self.topics.insert(name, Box::new(topic.clone())).is_none(), "topic with the same name already exists");
         topic
     }
 
@@ -61,10 +61,12 @@ pub struct Publisher<T: MorbDataType> {
 
 impl<T: MorbDataType> Publisher<T> {
     pub fn publish(&self, data: T) {
-        let index = (self.topic.generation.load(Ordering::SeqCst) as usize)
-            % (self.topic.queue_size as usize);
-        self.topic.fifo.lock().unwrap()[index] = Some(data);
-        self.topic.generation.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut fifo = self.topic.fifo.lock().unwrap();
+            let index = self.topic.generation.load(Ordering::Acquire) as usize % (self.topic.queue_size as usize);
+            fifo[index] = Some(data);
+        }
+        self.topic.generation.fetch_add(1, Ordering::AcqRel);        
         self.topic.notify();
     }
 }
@@ -84,12 +86,15 @@ impl<T: MorbDataType> Subscriber<T> {
 
     pub fn check_update_and_copy(&mut self) -> Option<T> {
         let topic_generation = self.topic.generation.load(Ordering::SeqCst);
-        if self.sub_generation != topic_generation {
-            let index = (self.sub_generation as usize) % (self.topic.queue_size as usize);
-            self.sub_generation += 1;
-            return self.topic.fifo.lock().unwrap()[index].clone();
+        if self.sub_generation == topic_generation {
+            return None;
         }
-        None
+        if self.sub_generation < topic_generation.saturating_sub(self.topic.queue_size as u32) {
+            self.sub_generation = topic_generation.saturating_sub(self.topic.queue_size as u32);
+        }
+        let index = (self.sub_generation as usize) % (self.topic.queue_size as usize);
+        self.sub_generation += 1;
+        self.topic.fifo.lock().unwrap()[index].clone()
     }
 }
 
@@ -140,6 +145,8 @@ pub struct Topic<T: MorbDataType> {
 
 impl<T: MorbDataType> Topic<T> {
     fn new(name: String, queue_size: u16, topic_id: usize) -> Self {
+        assert!(queue_size > 0, "queue_size must be greater than 0");
+
         Self {
             name,
             fifo: Mutex::new(vec![None; queue_size as usize]),
@@ -189,6 +196,9 @@ impl<T: MorbDataType> Topic<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Barrier;
     use std::thread;
 
     #[derive(Clone, Debug, PartialEq)]
@@ -318,5 +328,109 @@ mod tests {
         // Iterate over events (should be none in this case)
         let tokens: Vec<Token> = poller.iter().collect();
         assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn lagging_subscriber_should_not_emit_more_items_than_queue_can_retain() {
+        let topic = Arc::new(Topic::new("test_lagging_subscriber".to_string(), 2, 8));
+        let publisher = topic.create_publisher();
+        let mut subscriber = topic.create_subscriber();
+
+        for value in 0_u32..4 {
+            publisher.publish(value);
+        }
+
+        let mut received = Vec::new();
+        while subscriber.check_update() {
+            received.push(subscriber.check_update_and_copy().unwrap());
+        }
+
+        assert_eq!(
+            received,
+            vec![2, 3],
+            "a subscriber that falls behind the ring buffer should only observe the retained tail"
+        );
+    }
+
+    #[test]
+    fn concurrent_publishers_should_not_drop_or_duplicate_messages() {
+        const PRODUCERS: usize = 8;
+        const MESSAGES_PER_PRODUCER: usize = 250;
+        let topic = Arc::new(Topic::new(
+            "test_concurrent_publishers".to_string(),
+            (PRODUCERS * MESSAGES_PER_PRODUCER) as u16,
+            9,
+        ));
+        let barrier = Arc::new(Barrier::new(PRODUCERS));
+
+        let mut handles = Vec::new();
+        for producer_id in 0..PRODUCERS {
+            let topic = topic.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                let publisher = topic.create_publisher();
+                barrier.wait();
+                for seq in 0..MESSAGES_PER_PRODUCER {
+                    publisher.publish((producer_id * MESSAGES_PER_PRODUCER + seq) as u32);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let mut subscriber = topic.create_subscriber();
+        let mut received = Vec::new();
+        while subscriber.check_update() {
+            received.push(subscriber.check_update_and_copy().unwrap());
+        }
+
+        let unique: HashSet<_> = received.iter().copied().collect();
+        assert_eq!(
+            received.len(),
+            PRODUCERS * MESSAGES_PER_PRODUCER,
+            "every published message should be readable exactly once"
+        );
+        assert_eq!(
+            unique.len(),
+            PRODUCERS * MESSAGES_PER_PRODUCER,
+            "concurrent publishers produced duplicate or lost messages"
+        );
+    }
+
+    #[test]
+    fn subscriber_read_after_new_generation_observes_committed_data() {
+        let topic = Arc::new(Topic::new("test_generation_visibility".to_string(), 4, 10));
+        let writer_has_published_generation = Arc::new(AtomicBool::new(false));
+        let writer_may_unlock_fifo = Arc::new(Barrier::new(2));
+
+        let topic_for_writer = topic.clone();
+        let published_flag = writer_has_published_generation.clone();
+        let unlock_barrier = writer_may_unlock_fifo.clone();
+        let handle = thread::spawn(move || {
+            let mut fifo = topic_for_writer.fifo.lock().unwrap();
+            fifo[0] = Some(123_u32);
+            topic_for_writer.generation.store(1, Ordering::Release);
+            published_flag.store(true, Ordering::Release);
+
+            // Keep the fifo lock held after publishing generation to model the
+            // critical window where a subscriber can observe the update before
+            // it can enter the queue.
+            unlock_barrier.wait();
+        });
+
+        while !writer_has_published_generation.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+
+        let mut subscriber = topic.create_subscriber();
+        assert!(subscriber.check_update());
+
+        writer_may_unlock_fifo.wait();
+        let data = subscriber.check_update_and_copy();
+
+        assert_eq!(data, Some(123));
+        handle.join().unwrap();
     }
 }
