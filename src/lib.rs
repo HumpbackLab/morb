@@ -1,6 +1,4 @@
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::RwLock;
+use std::sync::{RwLock,Arc,Mutex,LazyLock};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -9,29 +7,47 @@ pub trait MorbDataType: Send + Sync + 'static + Clone{}
 impl<T> MorbDataType for T where T: Send + Sync + 'static + Clone{}
 
 pub struct TopicManager {
-    topics: Arc<RwLock<HashMap<String, Box<dyn std::any::Any + Send + Sync>>>>,
+    topics: HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
+    topic_num:usize
 }
+
+static TOPIC_MANAGER:LazyLock<Arc<RwLock<TopicManager>>> = LazyLock::new(||{
+    Arc::new(RwLock::new(TopicManager::new()))
+});
+
+pub fn create_topic<T:MorbDataType>(name: String, queue_size:u16) -> Arc<Topic<T>> {
+    TOPIC_MANAGER.write().unwrap().create_topic(name, queue_size)
+}
+
+pub fn get_topic<T:MorbDataType>(name: &str) -> Option<Arc<Topic<T>>> {
+    TOPIC_MANAGER.read().unwrap().get_topic(name)
+}
+
 
 impl TopicManager {
     pub fn new() -> Self {
         Self {
-            topics: Arc::new(RwLock::new(HashMap::new())),
+            topics: HashMap::new(),
+            topic_num:0
         }
     }
 
-    pub fn create_topic<T:MorbDataType>(&self, name: String, queue_size:u16) -> Arc<Topic<T>> {
-        let topic = Arc::new(Topic::new(name.clone(), queue_size));
-        self.topics.write().unwrap().insert(name, Box::new(topic.clone()));
+    pub fn create_topic<T:MorbDataType>(&mut self, name: String, queue_size:u16) -> Arc<Topic<T>> {
+        self.topic_num += 1;
+        let topic = Arc::new(Topic::new(name.clone(), queue_size, self.topic_num));
+        // use topic_num as topic_id, start from 1
+        
+        self.topics.insert(name, Box::new(topic.clone()));
         topic
     }
 
     pub fn get_topic<T:MorbDataType>(&self, name: &str) -> Option<Arc<Topic<T>>> {
-        self.topics.read().unwrap().get(name).and_then(|boxed| boxed.downcast_ref::<Arc<Topic<T>>>().cloned())
+        self.topics.get(name).and_then(|boxed| boxed.downcast_ref::<Arc<Topic<T>>>().cloned())
     }
 }
 
 
-struct Publisher<T:MorbDataType> {
+pub struct Publisher<T:MorbDataType> {
     topic: Arc<Topic<T>>,
 }
 
@@ -49,7 +65,7 @@ impl <T:MorbDataType> Publisher<T> {
     }
 }
 
-struct Subscriber<T:MorbDataType> {
+pub struct Subscriber<T:MorbDataType> {
     topic: Arc<Topic<T>>,
     sub_generation: u32,
 }
@@ -75,23 +91,25 @@ impl <T:MorbDataType> Subscriber<T> {
 
 }
 
-struct Topic<T:MorbDataType> {
+pub struct Topic<T:MorbDataType> {
     name: String,
     fifo: Mutex<Vec<Option<T>>>,
-    generation:AtomicU32,
+    pub(crate) generation:AtomicU32,
     wait_list: Vec<u64>,
     queue_size:u16,
+    topic_id:usize
 }
 
 impl<T: MorbDataType> Topic<T> {
     // use create_topic, this is private
-    fn new(name: String, queue_size:u16) -> Self {
+    fn new(name: String, queue_size:u16, topic_id:usize) -> Self {
         Self {
             name,
             fifo: Mutex::new(vec![None; queue_size as usize]),
             generation: AtomicU32::new(0),
             wait_list:Vec::new(),
             queue_size,
+            topic_id
         }
     }
 
@@ -122,13 +140,12 @@ mod tests {
     }
     #[test]
     fn basic_topic_pub_sub_test() {
-        let manager = TopicManager::new();
-        let test_topic = manager.create_topic::<test_struct>("test_struct".to_string(), 16);
+        let test_topic = create_topic::<test_struct>("test_struct_basic".to_string(), 16);
         let publisher_struct = test_topic.create_publisher();
         publisher_struct.publish(test_struct { test: 1, test2: 2 });
         assert_eq!(test_topic.generation.load(Ordering::SeqCst), 1);
 
-        
+
         let publisher = test_topic.create_publisher();
         publisher.publish(test_struct { test: 42, test2: 43 });
         assert_eq!(test_topic.generation.load(Ordering::SeqCst), 2);
@@ -139,7 +156,7 @@ mod tests {
         assert!(data.is_some());
         let data = data.unwrap();
         assert_eq!(data.test, 1);
-        assert_eq!(data.test2, 2);  
+        assert_eq!(data.test2, 2);
 
         assert!(sub.check_update());
         let data = sub.check_update_and_copy();
@@ -151,7 +168,7 @@ mod tests {
 
     #[test]
     fn topic_test() {
-        let topic:Topic<u16> = Topic::new("test".to_string(),16);
+        let topic:Topic<u16> = Topic::new("test".to_string(),16, 1);
         assert_eq!(topic.name, "test");
         assert_eq!(topic.generation.load(Ordering::SeqCst), 0);
     }
