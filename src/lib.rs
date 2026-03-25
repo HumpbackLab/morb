@@ -281,6 +281,10 @@ mod tests {
         let result = poller.wait(Some(Duration::from_millis(200)));
         assert!(result.is_ok());
 
+        for i in poller.iter() {
+            assert_eq!(i, topic.token);
+        }
+
         handle.join().unwrap();
     }
 
