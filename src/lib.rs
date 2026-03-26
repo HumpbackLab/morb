@@ -154,7 +154,7 @@ pub struct Topic<T: MorbDataType> {
     fifo: Mutex<Vec<Option<T>>>,
     pub(crate) generation: AtomicU32,
     queue_size: u16,
-    pub(crate) token: mio::Token,
+    token: mio::Token,
     eventfd: OwnedFd,
 }
 
@@ -192,6 +192,14 @@ impl<T: MorbDataType> Topic<T> {
                 std::mem::size_of::<u64>(),
             );
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn token(&self) -> Token {
+        self.token
     }
 
     pub fn create_publisher(self: &Arc<Self>) -> Publisher<T> {

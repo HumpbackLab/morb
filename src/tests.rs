@@ -43,9 +43,9 @@ fn basic_topic_pub_sub_test() {
 #[test]
 fn topic_test() {
     let topic: Topic<u16> = Topic::new("test".to_string(), 16, 1);
-    assert_eq!(topic.name, "test");
+    assert_eq!(topic.name(), "test");
     assert_eq!(topic.generation.load(Ordering::SeqCst), 0);
-    assert_eq!(topic.token, Token(1));
+    assert_eq!(topic.token(), Token(1));
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn topic_poller_notification_test() {
     assert!(result.is_ok());
 
     for i in poller.iter() {
-        assert_eq!(i, topic.token);
+        assert_eq!(i, topic.token());
     }
 
     handle.join().unwrap();
@@ -290,14 +290,14 @@ fn topic_num_not_incremented_on_duplicate() {
 
     // Create first topic
     let topic1 = create_topic::<u32>(topic_name1.clone(), 16).unwrap();
-    let token1 = topic1.token;
+    let token1 = topic1.token();
 
     // Try to create duplicate of first topic (should not increment topic_num)
     let _ = create_topic::<u32>(topic_name1, 16);
 
     // Create second topic - its token should be token1 + 1, not +2
     let topic2 = create_topic::<u32>(topic_name2, 16).unwrap();
-    let token2 = topic2.token;
+    let token2 = topic2.token();
     assert_eq!(usize::from(token2), usize::from(token1) + 1);
 
     // Try to create duplicate of second topic
@@ -306,5 +306,5 @@ fn topic_num_not_incremented_on_duplicate() {
 
     // Create third topic - should increment correctly
     let topic3 = create_topic::<u32>("test_topic_num_final".to_string(), 16).unwrap();
-    assert_eq!(usize::from(topic3.token), usize::from(token2) + 2);
+    assert_eq!(usize::from(topic3.token()), usize::from(token2) + 2);
 }
