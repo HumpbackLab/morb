@@ -70,7 +70,6 @@ fn benchmark_publish_and_poll(iterations: u64, queue_size: u16) {
         for token in poller.iter() {
             std::hint::black_box(token);
         }
-        topic.clear_event();
     }
     let elapsed = started.elapsed();
 

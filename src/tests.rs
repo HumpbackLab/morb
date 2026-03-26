@@ -134,6 +134,37 @@ fn topic_poller_iter_test() {
 }
 
 #[test]
+fn topic_poller_zero_timeout_without_updates_returns_no_tokens() {
+    let mut poller = TopicPoller::new();
+    let topic: Topic<u32> = Topic::new("test_zero_timeout_empty".to_string(), 16, 11);
+
+    poller.add_topic(&topic).unwrap();
+    poller.wait(Some(Duration::ZERO)).unwrap();
+
+    let tokens: Vec<Token> = poller.iter().collect();
+    assert!(tokens.is_empty());
+}
+
+#[test]
+fn topic_poller_zero_timeout_observes_updates_without_clearing_eventfd() {
+    let mut poller = TopicPoller::new();
+    let topic = Arc::new(Topic::new("test_zero_timeout_update".to_string(), 16, 12));
+    let publisher = topic.create_publisher();
+
+    poller.add_topic(&topic).unwrap();
+
+    publisher.publish(7_u32);
+    poller.wait(Some(Duration::ZERO)).unwrap();
+    let tokens: Vec<Token> = poller.iter().collect();
+    assert_eq!(tokens, vec![topic.token()]);
+
+    publisher.publish(8_u32);
+    poller.wait(Some(Duration::ZERO)).unwrap();
+    let tokens: Vec<Token> = poller.iter().collect();
+    assert_eq!(tokens, vec![topic.token()]);
+}
+
+#[test]
 fn lagging_subscriber_should_not_emit_more_items_than_queue_can_retain() {
     let topic = Arc::new(Topic::new("test_lagging_subscriber".to_string(), 2, 8));
     let publisher = topic.create_publisher();

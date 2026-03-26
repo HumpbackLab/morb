@@ -188,12 +188,17 @@ impl<T: MorbDataType> Subscriber<T> {
 pub struct TopicPoller {
     poll: Poll,
     events: Events,
+    manual_events: Vec<Token>,
     registrations: Vec<TopicPollerRegistration>,
 }
 
 struct TopicPollerRegistration {
     eventfd: RawFd,
+    token: Token,
+    generation: *const AtomicU32,
+    last_generation: u32,
     poller_count: Arc<AtomicUsize>,
+    registered: bool,
 }
 
 impl Default for TopicPoller {
@@ -208,22 +213,20 @@ impl TopicPoller {
         Self {
             poll: Poll::new().unwrap(),
             events: Events::with_capacity(1024),
+            manual_events: Vec::new(),
             registrations: Vec::new(),
         }
     }
 
     /// Registers a topic with the poller.
     pub fn add_topic<T: MorbDataType>(&mut self, topic: &Topic<T>) -> std::io::Result<()> {
-        mio::unix::SourceFd(&topic.eventfd.as_raw_fd()).register(
-            self.poll.registry(),
-            topic.token,
-            mio::Interest::READABLE,
-        )?;
-
-        topic.poller_count.fetch_add(1, Ordering::Relaxed);
         self.registrations.push(TopicPollerRegistration {
             eventfd: topic.eventfd.as_raw_fd(),
+            token: topic.token,
+            generation: &topic.generation,
+            last_generation: topic.generation.load(Ordering::SeqCst),
             poller_count: Arc::clone(&topic.poller_count),
+            registered: false,
         });
 
         Ok(())
@@ -231,15 +234,16 @@ impl TopicPoller {
 
     /// Removes a topic from the poller.
     pub fn remove_topic<T: MorbDataType>(&mut self, topic: &Topic<T>) -> std::io::Result<()> {
-        mio::unix::SourceFd(&topic.eventfd.as_raw_fd()).deregister(self.poll.registry())?;
-
         if let Some(index) = self
             .registrations
             .iter()
             .position(|registration| registration.eventfd == topic.eventfd.as_raw_fd())
         {
             let registration = self.registrations.swap_remove(index);
-            registration.poller_count.fetch_sub(1, Ordering::Relaxed);
+            if registration.registered {
+                mio::unix::SourceFd(&topic.eventfd.as_raw_fd()).deregister(self.poll.registry())?;
+                registration.poller_count.fetch_sub(1, Ordering::Relaxed);
+            }
         }
 
         Ok(())
@@ -247,19 +251,61 @@ impl TopicPoller {
 
     /// Waits until at least one registered topic becomes readable or the timeout expires.
     pub fn wait(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.manual_events.clear();
+
+        if timeout == Some(Duration::ZERO) {
+            for registration in &mut self.registrations {
+                let generation = unsafe { (*registration.generation).load(Ordering::SeqCst) };
+                if generation != registration.last_generation {
+                    registration.last_generation = generation;
+                    self.manual_events.push(registration.token);
+                }
+            }
+            return Ok(());
+        }
+
+        for registration in &mut self.registrations {
+            let generation = unsafe { (*registration.generation).load(Ordering::SeqCst) };
+            if generation != registration.last_generation {
+                registration.last_generation = generation;
+                self.manual_events.push(registration.token);
+            }
+        }
+        if !self.manual_events.is_empty() {
+            return Ok(());
+        }
+
+        for registration in &mut self.registrations {
+            if !registration.registered {
+                mio::unix::SourceFd(&registration.eventfd).register(
+                    self.poll.registry(),
+                    registration.token,
+                    mio::Interest::READABLE,
+                )?;
+                registration.poller_count.fetch_add(1, Ordering::Relaxed);
+                registration.registered = true;
+            }
+        }
+
         self.poll.poll(&mut self.events, timeout)
     }
 
     /// Iterates over ready topic tokens from the last `wait` call.
-    pub fn iter(&self) -> impl Iterator<Item = Token> + '_ {
-        self.events.iter().map(|event| event.token())
+    pub fn iter(&self) -> Box<dyn Iterator<Item = Token> + '_> {
+        if !self.manual_events.is_empty() {
+            Box::new(self.manual_events.iter().copied())
+        } else {
+            Box::new(self.events.iter().map(|event| event.token()))
+        }
     }
 }
 
 impl Drop for TopicPoller {
     fn drop(&mut self) {
         for registration in self.registrations.drain(..) {
-            registration.poller_count.fetch_sub(1, Ordering::Relaxed);
+            if registration.registered {
+                registration.poller_count.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 }
