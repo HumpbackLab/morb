@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::HashSet;
-use std::sync::atomic::AtomicBool;
 use std::sync::Barrier;
+use std::sync::atomic::AtomicBool;
 use std::thread;
 
 #[derive(Clone, Debug, PartialEq)]

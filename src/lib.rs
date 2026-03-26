@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
-use mio::{Events, Poll, Token};
 use mio::event::Source;
+use mio::{Events, Poll, Token};
 
 pub trait MorbDataType: Send + Sync + 'static + Clone {}
 impl<T> MorbDataType for T where T: Send + Sync + 'static + Clone {}
@@ -27,7 +27,10 @@ static TOPIC_MANAGER: LazyLock<Arc<RwLock<TopicManager>>> =
 /// Creates a new topic with the given name and queue size.
 ///
 /// Returns an error if a topic with the same name already exists.
-pub fn create_topic<T: MorbDataType>(name: String, queue_size: u16) -> Result<Arc<Topic<T>>,std::io::Error> {
+pub fn create_topic<T: MorbDataType>(
+    name: String,
+    queue_size: u16,
+) -> Result<Arc<Topic<T>>, std::io::Error> {
     TOPIC_MANAGER
         .write()
         .unwrap()
@@ -52,9 +55,12 @@ impl TopicManager {
         &mut self,
         name: String,
         queue_size: u16,
-    ) -> Result<Arc<Topic<T>>,std::io::Error> {
+    ) -> Result<Arc<Topic<T>>, std::io::Error> {
         if self.topics.contains_key(&name) {
-            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "Topic already exists"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Topic already exists",
+            ));
         }
         self.topic_num += 1;
         let topic = Arc::new(Topic::new(name.clone(), queue_size, self.topic_num));
@@ -84,9 +90,10 @@ impl<T: MorbDataType> Publisher<T> {
     pub fn publish(&self, data: T) {
         {
             let mut fifo = self.topic.fifo.lock().unwrap();
-            let index = self.topic.generation.load(Ordering::Acquire) as usize % (self.topic.queue_size as usize);
+            let index = self.topic.generation.load(Ordering::Acquire) as usize
+                % (self.topic.queue_size as usize);
             fifo[index] = Some(data);
-            self.topic.generation.fetch_add(1, Ordering::AcqRel);  
+            self.topic.generation.fetch_add(1, Ordering::AcqRel);
         }
         self.topic.notify();
     }
@@ -157,9 +164,7 @@ impl TopicPoller {
 
     /// Removes a topic from the poller.
     pub fn remove_topic<T: MorbDataType>(&mut self, topic: &Topic<T>) -> std::io::Result<()> {
-        mio::unix::SourceFd(&topic.eventfd.as_raw_fd()).deregister(
-            self.poll.registry(),
-        )
+        mio::unix::SourceFd(&topic.eventfd.as_raw_fd()).deregister(self.poll.registry())
     }
 
     /// Waits until at least one registered topic becomes readable or the timeout expires.
