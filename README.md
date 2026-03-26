@@ -40,3 +40,9 @@ Run tests:
 ```bash
 cargo test
 ```
+
+Run the benchmark example:
+
+```bash
+cargo run --release --example pubsub_benchmark -- 1000000
+```
