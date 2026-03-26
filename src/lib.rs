@@ -161,23 +161,23 @@ impl<T: MorbDataType> Topic<T> {
     }
 
     fn notify(&self) {
-        let value = usize::from(self.token);
+        let value = usize::from(self.token) as u64;
         unsafe {
             libc::write(
                 self.eventfd.as_raw_fd(),
-                &value as *const usize as *const libc::c_void,
-                std::mem::size_of::<usize>(),
+                &value as *const u64 as *const libc::c_void,
+                std::mem::size_of::<u64>(),
             );
         }
     }
 
     pub fn clear_event(&self) {
-        let mut value: usize = 0;
+        let mut value: u64 = 0;
         unsafe {
             libc::read(
                 self.eventfd.as_raw_fd(),
-                &mut value as *mut usize as *mut libc::c_void,
-                std::mem::size_of::<usize>(),
+                &mut value as *mut u64 as *mut libc::c_void,
+                std::mem::size_of::<u64>(),
             );
         }
     }
