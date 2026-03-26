@@ -215,7 +215,7 @@ fn subscriber_read_after_new_generation_observes_committed_data() {
     let unlock_barrier = writer_may_unlock_fifo.clone();
     let handle = thread::spawn(move || {
         let mut fifo = topic_for_writer.fifo.lock().unwrap();
-        fifo[0] = Some(123_u32);
+        fifo.write(0, 123_u32);
         topic_for_writer.generation.store(1, Ordering::Release);
         published_flag.store(true, Ordering::Release);
 

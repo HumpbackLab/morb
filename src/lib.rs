@@ -4,8 +4,9 @@
 //! and poll-based notifications built on `mio` and `eventfd`.
 
 use std::collections::HashMap;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
@@ -14,6 +15,57 @@ use mio::{Events, Poll, Token};
 
 pub trait MorbDataType: Send + Sync + 'static + Clone {}
 impl<T> MorbDataType for T where T: Send + Sync + 'static + Clone {}
+
+struct RingBuffer<T> {
+    slots: Box<[MaybeUninit<T>]>,
+    initialized: Box<[bool]>,
+}
+
+impl<T> RingBuffer<T> {
+    fn new(size: usize) -> Self {
+        let mut slots = Vec::with_capacity(size);
+        slots.resize_with(size, MaybeUninit::uninit);
+
+        Self {
+            slots: slots.into_boxed_slice(),
+            initialized: vec![false; size].into_boxed_slice(),
+        }
+    }
+
+    fn write(&mut self, index: usize, value: T) {
+        if self.initialized[index] {
+            unsafe {
+                self.slots[index].assume_init_drop();
+            }
+        }
+
+        self.slots[index].write(value);
+        self.initialized[index] = true;
+    }
+
+    fn read_cloned(&self, index: usize) -> Option<T>
+    where
+        T: Clone,
+    {
+        if !self.initialized[index] {
+            return None;
+        }
+
+        Some(unsafe { self.slots[index].assume_init_ref().clone() })
+    }
+}
+
+impl<T> Drop for RingBuffer<T> {
+    fn drop(&mut self) {
+        for (index, initialized) in self.initialized.iter().copied().enumerate() {
+            if initialized {
+                unsafe {
+                    self.slots[index].assume_init_drop();
+                }
+            }
+        }
+    }
+}
 
 /// Stores all globally registered topics.
 pub struct TopicManager {
@@ -92,7 +144,7 @@ impl<T: MorbDataType> Publisher<T> {
             let mut fifo = self.topic.fifo.lock().unwrap();
             let index = self.topic.generation.load(Ordering::Acquire) as usize
                 % (self.topic.queue_size as usize);
-            fifo[index] = Some(data);
+            fifo.write(index, data);
             self.topic.generation.fetch_add(1, Ordering::AcqRel);
         }
         self.topic.notify();
@@ -128,7 +180,7 @@ impl<T: MorbDataType> Subscriber<T> {
         }
         let index = (self.sub_generation as usize) % (self.topic.queue_size as usize);
         self.sub_generation += 1;
-        self.topic.fifo.lock().unwrap()[index].clone()
+        self.topic.fifo.lock().unwrap().read_cloned(index)
     }
 }
 
@@ -136,6 +188,12 @@ impl<T: MorbDataType> Subscriber<T> {
 pub struct TopicPoller {
     poll: Poll,
     events: Events,
+    registrations: Vec<TopicPollerRegistration>,
+}
+
+struct TopicPollerRegistration {
+    eventfd: RawFd,
+    poller_count: Arc<AtomicUsize>,
 }
 
 impl Default for TopicPoller {
@@ -150,6 +208,7 @@ impl TopicPoller {
         Self {
             poll: Poll::new().unwrap(),
             events: Events::with_capacity(1024),
+            registrations: Vec::new(),
         }
     }
 
@@ -159,12 +218,31 @@ impl TopicPoller {
             self.poll.registry(),
             topic.token,
             mio::Interest::READABLE,
-        )
+        )?;
+
+        topic.poller_count.fetch_add(1, Ordering::Relaxed);
+        self.registrations.push(TopicPollerRegistration {
+            eventfd: topic.eventfd.as_raw_fd(),
+            poller_count: Arc::clone(&topic.poller_count),
+        });
+
+        Ok(())
     }
 
     /// Removes a topic from the poller.
     pub fn remove_topic<T: MorbDataType>(&mut self, topic: &Topic<T>) -> std::io::Result<()> {
-        mio::unix::SourceFd(&topic.eventfd.as_raw_fd()).deregister(self.poll.registry())
+        mio::unix::SourceFd(&topic.eventfd.as_raw_fd()).deregister(self.poll.registry())?;
+
+        if let Some(index) = self
+            .registrations
+            .iter()
+            .position(|registration| registration.eventfd == topic.eventfd.as_raw_fd())
+        {
+            let registration = self.registrations.swap_remove(index);
+            registration.poller_count.fetch_sub(1, Ordering::Relaxed);
+        }
+
+        Ok(())
     }
 
     /// Waits until at least one registered topic becomes readable or the timeout expires.
@@ -178,14 +256,23 @@ impl TopicPoller {
     }
 }
 
+impl Drop for TopicPoller {
+    fn drop(&mut self) {
+        for registration in self.registrations.drain(..) {
+            registration.poller_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// A named message channel with fixed-size retention and poll notifications.
 pub struct Topic<T: MorbDataType> {
     name: String,
-    fifo: Mutex<Vec<Option<T>>>,
+    fifo: Mutex<RingBuffer<T>>,
     pub(crate) generation: AtomicU32,
     queue_size: u16,
     token: mio::Token,
     eventfd: OwnedFd,
+    poller_count: Arc<AtomicUsize>,
 }
 
 impl<T: MorbDataType> Topic<T> {
@@ -194,15 +281,20 @@ impl<T: MorbDataType> Topic<T> {
 
         Self {
             name,
-            fifo: Mutex::new(vec![None; queue_size as usize]),
+            fifo: Mutex::new(RingBuffer::new(queue_size as usize)),
             generation: AtomicU32::new(0),
             queue_size,
             token: Token(topic_id),
             eventfd: unsafe { OwnedFd::from_raw_fd(libc::eventfd(0, libc::EFD_NONBLOCK)) },
+            poller_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     fn notify(&self) {
+        if self.poller_count.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+
         let value = usize::from(self.token) as u64;
         unsafe {
             libc::write(
