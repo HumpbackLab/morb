@@ -18,7 +18,7 @@ pub struct TopicManager {
 static TOPIC_MANAGER: LazyLock<Arc<RwLock<TopicManager>>> =
     LazyLock::new(|| Arc::new(RwLock::new(TopicManager::new())));
 
-pub fn create_topic<T: MorbDataType>(name: String, queue_size: u16) -> Result<Arc<Topic<T>>,()> {
+pub fn create_topic<T: MorbDataType>(name: String, queue_size: u16) -> Result<Arc<Topic<T>>,std::io::Error> {
     TOPIC_MANAGER
         .write()
         .unwrap()
@@ -41,9 +41,9 @@ impl TopicManager {
         &mut self,
         name: String,
         queue_size: u16,
-    ) -> Result<Arc<Topic<T>>,()> {
+    ) -> Result<Arc<Topic<T>>,std::io::Error> {
         if self.topics.contains_key(&name) {
-            return Err(());
+            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "Topic already exists"));
         }
         self.topic_num += 1;
         let topic = Arc::new(Topic::new(name.clone(), queue_size, self.topic_num));
@@ -55,6 +55,12 @@ impl TopicManager {
         self.topics
             .get(name)
             .and_then(|boxed| boxed.downcast_ref::<Arc<Topic<T>>>().cloned())
+    }
+}
+
+impl Default for TopicManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -104,6 +110,12 @@ impl<T: MorbDataType> Subscriber<T> {
 pub struct TopicPoller {
     poll: Poll,
     events: Events,
+}
+
+impl Default for TopicPoller {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TopicPoller {
