@@ -146,6 +146,7 @@ impl Default for TopicManager {
     }
 }
 
+#[derive(Clone)]
 pub struct Publisher<T: MorbDataType> {
     topic: Arc<Topic<T>>,
 }
@@ -166,6 +167,7 @@ impl<T: MorbDataType> Publisher<T> {
 }
 
 /// Reads messages from a topic in publish order.
+#[derive(Clone)]
 pub struct Subscriber<T: MorbDataType> {
     topic: Arc<Topic<T>>,
     sub_generation: u32,

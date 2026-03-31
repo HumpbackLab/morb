@@ -253,6 +253,37 @@ fn subscriber_read_timeout_returns_message_before_timeout() {
 }
 
 #[test]
+fn cloned_publisher_publishes_to_the_same_topic() {
+    let topic = Arc::new(Topic::new("test_cloned_publisher".to_string(), 4, 17));
+    let publisher = topic.create_publisher();
+    let cloned_publisher = publisher.clone();
+    let mut subscriber = topic.create_subscriber();
+
+    publisher.publish(1_u32);
+    cloned_publisher.publish(2_u32);
+
+    assert_eq!(subscriber.check_update_and_copy(), Some(1));
+    assert_eq!(subscriber.check_update_and_copy(), Some(2));
+}
+
+#[test]
+fn cloned_subscriber_inherits_the_current_read_cursor() {
+    let topic = Arc::new(Topic::new("test_cloned_subscriber".to_string(), 4, 18));
+    let publisher = topic.create_publisher();
+    let mut subscriber = topic.create_subscriber();
+
+    publisher.publish(10_u32);
+    publisher.publish(20_u32);
+
+    assert_eq!(subscriber.check_update_and_copy(), Some(10));
+
+    let mut cloned_subscriber = subscriber.clone();
+
+    assert_eq!(subscriber.check_update_and_copy(), Some(20));
+    assert_eq!(cloned_subscriber.check_update_and_copy(), Some(20));
+}
+
+#[test]
 fn concurrent_publishers_should_not_drop_or_duplicate_messages() {
     const PRODUCERS: usize = 8;
     const MESSAGES_PER_PRODUCER: usize = 250;
