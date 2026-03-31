@@ -213,8 +213,8 @@ impl<T: MorbDataType> Subscriber<T> {
         let _wait_guard = BlockingWaitGuard::new(&self.topic.blocking_waiters);
         loop {
             let try_ret = self.check_update_and_copy();
-            if try_ret.is_some() {
-                return try_ret.unwrap();
+            if let Some(msg) = try_ret {
+                return msg;
             }
             atomic_wait::wait(&self.topic.generation, self.sub_generation);
         }
