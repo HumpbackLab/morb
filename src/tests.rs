@@ -187,6 +187,37 @@ fn lagging_subscriber_should_not_emit_more_items_than_queue_can_retain() {
 }
 
 #[test]
+fn subscriber_read_blocking_returns_immediately_when_data_is_available() {
+    let topic = Arc::new(Topic::new("test_read_blocking_ready".to_string(), 4, 13));
+    let publisher = topic.create_publisher();
+    let mut subscriber = topic.create_subscriber();
+
+    publisher.publish(42_u32);
+
+    assert_eq!(subscriber.read_blocking(), 42);
+}
+
+#[test]
+fn subscriber_read_blocking_waits_until_publish_arrives() {
+    let topic = Arc::new(Topic::new("test_read_blocking_wait".to_string(), 4, 14));
+    let start_barrier = Arc::new(Barrier::new(2));
+
+    let topic_for_reader = topic.clone();
+    let start_barrier_for_reader = start_barrier.clone();
+    let handle = thread::spawn(move || {
+        let mut subscriber = topic_for_reader.create_subscriber();
+        start_barrier_for_reader.wait();
+        subscriber.read_blocking()
+    });
+
+    start_barrier.wait();
+    thread::sleep(Duration::from_millis(20));
+    topic.create_publisher().publish(77_u32);
+
+    assert_eq!(handle.join().unwrap(), 77);
+}
+
+#[test]
 fn concurrent_publishers_should_not_drop_or_duplicate_messages() {
     const PRODUCERS: usize = 8;
     const MESSAGES_PER_PRODUCER: usize = 250;

@@ -158,6 +158,7 @@ impl<T: MorbDataType> Publisher<T> {
             self.topic.generation.fetch_add(1, Ordering::AcqRel);
         }
         self.topic.notify();
+        atomic_wait::wake_all(&self.topic.generation);
     }
 }
 
@@ -174,6 +175,16 @@ impl<T: MorbDataType> Subscriber<T> {
             return true;
         }
         false
+    }
+
+    pub fn read_blocking(&mut self) -> T {
+        loop {
+            let try_ret = self.check_update_and_copy();
+            if try_ret.is_some() {
+                return try_ret.unwrap();
+            }
+            atomic_wait::wait(&self.topic.generation, self.sub_generation);
+        }
     }
 
     /// Returns the next unread value, if any.

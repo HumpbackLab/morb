@@ -12,5 +12,6 @@ keywords = ["pubsub", "message", "mio", "eventfd"]
 categories = ["concurrency", "data-structures"]
 
 [dependencies]
+atomic-wait = "1.1.0"
 libc = "0.2.183"
 mio = {version = "1.1.1",features = ["os-poll","os-ext"] }
