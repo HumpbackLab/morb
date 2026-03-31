@@ -208,31 +208,19 @@ impl<T: MorbDataType> Subscriber<T> {
         false
     }
 
-    /// Reads the next message, blocking until one is available.
+    /// Reads the next message, waiting until one is available or the timeout expires.
     ///
     /// If there is already an unread message, returns it immediately.
-    /// Otherwise, blocks until a new message is published.
-    pub fn read_blocking(&mut self) -> T {
-        let _wait_guard = BlockingWaitGuard::new(&self.topic.blocking_waiters);
-        loop {
-            let try_ret = self.check_update_and_copy();
-            if let Some(msg) = try_ret {
-                return msg;
-            }
-            atomic_wait::wait(&self.topic.generation, self.sub_generation);
-        }
-    }
-
-    /// Reads the next message, blocking until one is available or the timeout expires.
+    /// Otherwise, waits until a new message is published.
     ///
-    /// If there is already an unread message, returns it immediately.
-    /// Otherwise, waits until a new message is published or the timeout expires.
+    /// Passing `None` waits indefinitely. Passing `Some(duration)` waits up to
+    /// the provided duration.
     ///
     /// # Errors
     ///
     /// Returns an error with [`ErrorKind::TimedOut`] if no message is available
     /// within the specified timeout.
-    pub fn read_timeout(&mut self, timeout: Duration) -> std::io::Result<T> {
+    pub fn read(&mut self, timeout: Option<Duration>) -> std::io::Result<T> {
         let start = std::time::Instant::now();
         let _wait_guard = BlockingWaitGuard::new(&self.topic.blocking_waiters);
         loop {
@@ -240,18 +228,22 @@ impl<T: MorbDataType> Subscriber<T> {
                 return Ok(msg);
             }
 
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "read timed out",
-                ));
-            }
+            if let Some(timeout) = timeout {
+                let elapsed = start.elapsed();
+                if elapsed >= timeout {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "read timed out",
+                    ));
+                }
 
-            let remaining = timeout - elapsed;
-            let mut poller = TopicPoller::new();
-            poller.add_topic(&self.topic)?;
-            poller.wait(Some(remaining))?;
+                let remaining = timeout - elapsed;
+                let mut poller = TopicPoller::new();
+                poller.add_topic(&self.topic)?;
+                poller.wait(Some(remaining))?;
+            } else {
+                atomic_wait::wait(&self.topic.generation, self.sub_generation);
+            }
         }
     }
 

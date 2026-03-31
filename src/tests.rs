@@ -187,18 +187,18 @@ fn lagging_subscriber_should_not_emit_more_items_than_queue_can_retain() {
 }
 
 #[test]
-fn subscriber_read_blocking_returns_immediately_when_data_is_available() {
+fn subscriber_read_without_timeout_returns_immediately_when_data_is_available() {
     let topic = Arc::new(Topic::new("test_read_blocking_ready".to_string(), 4, 13));
     let publisher = topic.create_publisher();
     let mut subscriber = topic.create_subscriber();
 
     publisher.publish(42_u32);
 
-    assert_eq!(subscriber.read_blocking(), 42);
+    assert_eq!(subscriber.read(None).unwrap(), 42);
 }
 
 #[test]
-fn subscriber_read_blocking_waits_until_publish_arrives() {
+fn subscriber_read_without_timeout_waits_until_publish_arrives() {
     let topic = Arc::new(Topic::new("test_read_blocking_wait".to_string(), 4, 14));
     let start_barrier = Arc::new(Barrier::new(2));
 
@@ -207,7 +207,7 @@ fn subscriber_read_blocking_waits_until_publish_arrives() {
     let handle = thread::spawn(move || {
         let mut subscriber = topic_for_reader.create_subscriber();
         start_barrier_for_reader.wait();
-        subscriber.read_blocking()
+        subscriber.read(None).unwrap()
     });
 
     start_barrier.wait();
@@ -218,7 +218,7 @@ fn subscriber_read_blocking_waits_until_publish_arrives() {
 }
 
 #[test]
-fn subscriber_read_timeout_returns_timed_out_error() {
+fn subscriber_read_with_timeout_returns_timed_out_error() {
     let topic = Arc::new(Topic::<u32>::new(
         "test_read_timeout_empty".to_string(),
         4,
@@ -227,13 +227,13 @@ fn subscriber_read_timeout_returns_timed_out_error() {
     let mut subscriber = topic.create_subscriber();
 
     let err = subscriber
-        .read_timeout(Duration::from_millis(10))
+        .read(Some(Duration::from_millis(10)))
         .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
 }
 
 #[test]
-fn subscriber_read_timeout_returns_message_before_timeout() {
+fn subscriber_read_with_timeout_returns_message_before_timeout() {
     let topic = Arc::new(Topic::new("test_read_timeout_wait".to_string(), 4, 16));
     let start_barrier = Arc::new(Barrier::new(2));
 
@@ -242,7 +242,7 @@ fn subscriber_read_timeout_returns_message_before_timeout() {
     let handle = thread::spawn(move || {
         let mut subscriber = topic_for_reader.create_subscriber();
         start_barrier_for_reader.wait();
-        subscriber.read_timeout(Duration::from_millis(200)).unwrap()
+        subscriber.read(Some(Duration::from_millis(200))).unwrap()
     });
 
     start_barrier.wait();
@@ -333,7 +333,7 @@ fn select_supports_multiple_subscribers_on_the_same_topic() {
 }
 
 #[test]
-fn subscriber_read_blocking_clears_waiter_count_after_wake() {
+fn subscriber_read_without_timeout_clears_waiter_count_after_wake() {
     let topic = Arc::new(Topic::new("test_blocking_waiter_count".to_string(), 4, 24));
     let start_barrier = Arc::new(Barrier::new(2));
 
@@ -342,7 +342,7 @@ fn subscriber_read_blocking_clears_waiter_count_after_wake() {
     let handle = thread::spawn(move || {
         let mut subscriber = topic_for_reader.create_subscriber();
         start_barrier_for_reader.wait();
-        subscriber.read_blocking()
+        subscriber.read(None).unwrap()
     });
 
     start_barrier.wait();
@@ -357,7 +357,7 @@ fn subscriber_read_blocking_clears_waiter_count_after_wake() {
 }
 
 #[test]
-fn subscriber_read_timeout_clears_waiter_count_after_timeout() {
+fn subscriber_read_with_timeout_clears_waiter_count_after_timeout() {
     let topic = Arc::new(Topic::<u32>::new(
         "test_read_timeout_waiter_cleanup".to_string(),
         4,
@@ -366,7 +366,7 @@ fn subscriber_read_timeout_clears_waiter_count_after_timeout() {
     let mut subscriber = topic.create_subscriber();
 
     let err = subscriber
-        .read_timeout(Duration::from_millis(10))
+        .read(Some(Duration::from_millis(10)))
         .unwrap_err();
 
     assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
