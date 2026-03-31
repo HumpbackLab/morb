@@ -253,8 +253,49 @@ fn subscriber_read_timeout_returns_message_before_timeout() {
 }
 
 #[test]
+fn subscriber_read_blocking_clears_waiter_count_after_wake() {
+    let topic = Arc::new(Topic::new("test_blocking_waiter_count".to_string(), 4, 17));
+    let start_barrier = Arc::new(Barrier::new(2));
+
+    let topic_for_reader = topic.clone();
+    let start_barrier_for_reader = start_barrier.clone();
+    let handle = thread::spawn(move || {
+        let mut subscriber = topic_for_reader.create_subscriber();
+        start_barrier_for_reader.wait();
+        subscriber.read_blocking()
+    });
+
+    start_barrier.wait();
+    while topic.blocking_waiters.load(Ordering::SeqCst) == 0 {
+        thread::yield_now();
+    }
+    assert_eq!(topic.blocking_waiters.load(Ordering::SeqCst), 1);
+
+    topic.create_publisher().publish(99_u32);
+    assert_eq!(handle.join().unwrap(), 99);
+    assert_eq!(topic.blocking_waiters.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subscriber_read_timeout_clears_waiter_count_after_timeout() {
+    let topic = Arc::new(Topic::<u32>::new(
+        "test_read_timeout_waiter_cleanup".to_string(),
+        4,
+        18,
+    ));
+    let mut subscriber = topic.create_subscriber();
+
+    let err = subscriber
+        .read_timeout(Duration::from_millis(10))
+        .unwrap_err();
+
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(topic.blocking_waiters.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn cloned_publisher_publishes_to_the_same_topic() {
-    let topic = Arc::new(Topic::new("test_cloned_publisher".to_string(), 4, 17));
+    let topic = Arc::new(Topic::new("test_cloned_publisher".to_string(), 4, 19));
     let publisher = topic.create_publisher();
     let cloned_publisher = publisher.clone();
     let mut subscriber = topic.create_subscriber();
@@ -268,7 +309,7 @@ fn cloned_publisher_publishes_to_the_same_topic() {
 
 #[test]
 fn cloned_subscriber_inherits_the_current_read_cursor() {
-    let topic = Arc::new(Topic::new("test_cloned_subscriber".to_string(), 4, 18));
+    let topic = Arc::new(Topic::new("test_cloned_subscriber".to_string(), 4, 20));
     let publisher = topic.create_publisher();
     let mut subscriber = topic.create_subscriber();
 

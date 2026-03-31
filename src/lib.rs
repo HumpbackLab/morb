@@ -162,7 +162,9 @@ impl<T: MorbDataType> Publisher<T> {
             self.topic.generation.fetch_add(1, Ordering::AcqRel);
         }
         self.topic.notify();
-        atomic_wait::wake_all(&self.topic.generation);
+        if self.topic.blocking_waiters.load(Ordering::Acquire) > 0 {
+            atomic_wait::wake_all(&self.topic.generation);
+        }
     }
 }
 
@@ -171,6 +173,27 @@ impl<T: MorbDataType> Publisher<T> {
 pub struct Subscriber<T: MorbDataType> {
     topic: Arc<Topic<T>>,
     sub_generation: u32,
+}
+
+struct BlockingWaitGuard {
+    waiters: *const AtomicUsize,
+}
+
+impl BlockingWaitGuard {
+    fn new(waiters: &AtomicUsize) -> Self {
+        waiters.fetch_add(1, Ordering::Release);
+        Self {
+            waiters: waiters as *const AtomicUsize,
+        }
+    }
+}
+
+impl Drop for BlockingWaitGuard {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.waiters).fetch_sub(1, Ordering::Release);
+        }
+    }
 }
 
 impl<T: MorbDataType> Subscriber<T> {
@@ -187,6 +210,7 @@ impl<T: MorbDataType> Subscriber<T> {
     /// If there is already an unread message, returns it immediately.
     /// Otherwise, blocks until a new message is published.
     pub fn read_blocking(&mut self) -> T {
+        let _wait_guard = BlockingWaitGuard::new(&self.topic.blocking_waiters);
         loop {
             let try_ret = self.check_update_and_copy();
             if try_ret.is_some() {
@@ -207,7 +231,7 @@ impl<T: MorbDataType> Subscriber<T> {
     /// within the specified timeout.
     pub fn read_timeout(&mut self, timeout: Duration) -> std::io::Result<T> {
         let start = std::time::Instant::now();
-
+        let _wait_guard = BlockingWaitGuard::new(&self.topic.blocking_waiters);
         loop {
             if let Some(msg) = self.check_update_and_copy() {
                 return Ok(msg);
@@ -381,6 +405,7 @@ pub struct Topic<T: MorbDataType> {
     token: mio::Token,
     eventfd: OwnedFd,
     poller_count: Arc<AtomicUsize>,
+    blocking_waiters: AtomicUsize,
 }
 
 impl<T: MorbDataType> Topic<T> {
@@ -395,6 +420,7 @@ impl<T: MorbDataType> Topic<T> {
             token: Token(topic_id),
             eventfd: unsafe { OwnedFd::from_raw_fd(libc::eventfd(0, libc::EFD_NONBLOCK)) },
             poller_count: Arc::new(AtomicUsize::new(0)),
+            blocking_waiters: AtomicUsize::new(0),
         }
     }
 
