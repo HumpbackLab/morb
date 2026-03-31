@@ -333,8 +333,39 @@ fn select_supports_multiple_subscribers_on_the_same_topic() {
 }
 
 #[test]
+fn select_macro_dispatches_to_the_ready_branch() {
+    let topic1 = Arc::new(Topic::new("test_select_macro_1".to_string(), 4, 28));
+    let topic2 = Arc::new(Topic::new("test_select_macro_2".to_string(), 4, 29));
+    let mut sub1 = topic1.create_subscriber();
+    let mut sub2 = topic2.create_subscriber();
+
+    topic2.create_publisher().publish(90_u32);
+
+    let result = crate::select! {
+        msg = sub1 => { msg + 1 },
+        msg = sub2 => { msg + 2 },
+    }
+    .unwrap();
+
+    assert_eq!(result, 92);
+}
+
+#[test]
+fn select_macro_supports_timeout_argument() {
+    let topic = Arc::new(Topic::<u32>::new(
+        "test_select_macro_timeout".to_string(),
+        4,
+        30,
+    ));
+    let mut sub = topic.create_subscriber();
+
+    let err = crate::select!(Some(Duration::from_millis(10)); msg = sub => { msg }).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[test]
 fn subscriber_read_without_timeout_clears_waiter_count_after_wake() {
-    let topic = Arc::new(Topic::new("test_blocking_waiter_count".to_string(), 4, 24));
+    let topic = Arc::new(Topic::new("test_blocking_waiter_count".to_string(), 4, 31));
     let start_barrier = Arc::new(Barrier::new(2));
 
     let topic_for_reader = topic.clone();
@@ -361,7 +392,7 @@ fn subscriber_read_with_timeout_clears_waiter_count_after_timeout() {
     let topic = Arc::new(Topic::<u32>::new(
         "test_read_timeout_waiter_cleanup".to_string(),
         4,
-        25,
+        32,
     ));
     let mut subscriber = topic.create_subscriber();
 
@@ -375,7 +406,7 @@ fn subscriber_read_with_timeout_clears_waiter_count_after_timeout() {
 
 #[test]
 fn cloned_publisher_publishes_to_the_same_topic() {
-    let topic = Arc::new(Topic::new("test_cloned_publisher".to_string(), 4, 26));
+    let topic = Arc::new(Topic::new("test_cloned_publisher".to_string(), 4, 33));
     let publisher = topic.create_publisher();
     let cloned_publisher = publisher.clone();
     let mut subscriber = topic.create_subscriber();
@@ -389,7 +420,7 @@ fn cloned_publisher_publishes_to_the_same_topic() {
 
 #[test]
 fn cloned_subscriber_inherits_the_current_read_cursor() {
-    let topic = Arc::new(Topic::new("test_cloned_subscriber".to_string(), 4, 27));
+    let topic = Arc::new(Topic::new("test_cloned_subscriber".to_string(), 4, 34));
     let publisher = topic.create_publisher();
     let mut subscriber = topic.create_subscriber();
 
