@@ -94,6 +94,9 @@ pub fn get_topic<T: MorbDataType>(name: &str) -> Option<Arc<Topic<T>>> {
     TOPIC_MANAGER.read().unwrap().get_topic(name)
 }
 
+/// Returns a previously created topic by name and type, or creates a new one if it doesn't exist.
+///
+/// If the topic already exists, `queue_size` is ignored.
 pub fn get_or_create_topic<T: MorbDataType>(
     name: String,
     queue_size: u16,
@@ -177,6 +180,10 @@ impl<T: MorbDataType> Subscriber<T> {
         false
     }
 
+    /// Reads the next message, blocking until one is available.
+    ///
+    /// If there is already an unread message, returns it immediately.
+    /// Otherwise, blocks until a new message is published.
     pub fn read_blocking(&mut self) -> T {
         loop {
             let try_ret = self.check_update_and_copy();
@@ -187,6 +194,15 @@ impl<T: MorbDataType> Subscriber<T> {
         }
     }
 
+    /// Reads the next message, blocking until one is available or the timeout expires.
+    ///
+    /// If there is already an unread message, returns it immediately.
+    /// Otherwise, waits until a new message is published or the timeout expires.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error with [`ErrorKind::TimedOut`] if no message is available
+    /// within the specified timeout.
     pub fn read_timeout(&mut self, timeout: Duration) -> std::io::Result<T> {
         let start = std::time::Instant::now();
 
