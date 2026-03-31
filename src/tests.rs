@@ -284,6 +284,36 @@ fn create_topic_with_existing_name_returns_error() {
 }
 
 #[test]
+fn get_or_create_topic_creates_missing_topic() {
+    let topic_name = "test_get_or_create_new_topic".to_string();
+
+    let topic = get_or_create_topic::<u32>(topic_name.clone(), 16).unwrap();
+    assert_eq!(topic.name(), topic_name);
+
+    let publisher = topic.create_publisher();
+    publisher.publish(99);
+
+    let fetched = get_topic::<u32>("test_get_or_create_new_topic").unwrap();
+    let mut subscriber = fetched.create_subscriber();
+    assert_eq!(subscriber.check_update_and_copy(), Some(99));
+}
+
+#[test]
+fn get_or_create_topic_returns_existing_topic() {
+    let topic_name = "test_get_or_create_existing_topic".to_string();
+
+    let topic = create_topic::<u32>(topic_name.clone(), 16).unwrap();
+    let token = topic.token();
+    topic.create_publisher().publish(123);
+
+    let same_topic = get_or_create_topic::<u32>(topic_name, 32).unwrap();
+    assert_eq!(same_topic.token(), token);
+
+    let mut subscriber = same_topic.create_subscriber();
+    assert_eq!(subscriber.check_update_and_copy(), Some(123));
+}
+
+#[test]
 fn duplicate_topic_creation_does_not_replace_existing_topic() {
     let topic_name = "test_no_replace_topic".to_string();
 

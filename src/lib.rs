@@ -94,6 +94,16 @@ pub fn get_topic<T: MorbDataType>(name: &str) -> Option<Arc<Topic<T>>> {
     TOPIC_MANAGER.read().unwrap().get_topic(name)
 }
 
+pub fn get_or_create_topic<T: MorbDataType>(
+    name: String,
+    queue_size: u16,
+) -> Result<Arc<Topic<T>>, std::io::Error> {
+    if let Some(topic) = get_topic::<T>(&name) {
+        return Ok(topic);
+    }
+    create_topic(name, queue_size)
+}
+
 impl TopicManager {
     /// Creates an empty topic manager.
     pub fn new() -> Self {
