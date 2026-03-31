@@ -218,6 +218,41 @@ fn subscriber_read_blocking_waits_until_publish_arrives() {
 }
 
 #[test]
+fn subscriber_read_timeout_returns_timed_out_error() {
+    let topic = Arc::new(Topic::<u32>::new(
+        "test_read_timeout_empty".to_string(),
+        4,
+        15,
+    ));
+    let mut subscriber = topic.create_subscriber();
+
+    let err = subscriber
+        .read_timeout(Duration::from_millis(10))
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn subscriber_read_timeout_returns_message_before_timeout() {
+    let topic = Arc::new(Topic::new("test_read_timeout_wait".to_string(), 4, 16));
+    let start_barrier = Arc::new(Barrier::new(2));
+
+    let topic_for_reader = topic.clone();
+    let start_barrier_for_reader = start_barrier.clone();
+    let handle = thread::spawn(move || {
+        let mut subscriber = topic_for_reader.create_subscriber();
+        start_barrier_for_reader.wait();
+        subscriber.read_timeout(Duration::from_millis(200)).unwrap()
+    });
+
+    start_barrier.wait();
+    thread::sleep(Duration::from_millis(20));
+    topic.create_publisher().publish(88_u32);
+
+    assert_eq!(handle.join().unwrap(), 88);
+}
+
+#[test]
 fn concurrent_publishers_should_not_drop_or_duplicate_messages() {
     const PRODUCERS: usize = 8;
     const MESSAGES_PER_PRODUCER: usize = 250;

@@ -187,6 +187,29 @@ impl<T: MorbDataType> Subscriber<T> {
         }
     }
 
+    pub fn read_timeout(&mut self, timeout: Duration) -> std::io::Result<T> {
+        let start = std::time::Instant::now();
+
+        loop {
+            if let Some(msg) = self.check_update_and_copy() {
+                return Ok(msg);
+            }
+
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "read timed out",
+                ));
+            }
+
+            let remaining = timeout - elapsed;
+            let mut poller = TopicPoller::new();
+            poller.add_topic(&self.topic)?;
+            poller.wait(Some(remaining))?;
+        }
+    }
+
     /// Returns the next unread value, if any.
     ///
     /// If the subscriber has fallen behind the ring buffer, only retained
