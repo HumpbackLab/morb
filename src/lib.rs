@@ -13,6 +13,9 @@ use std::time::Duration;
 use mio::event::Source;
 use mio::{Events, Poll, Token};
 
+mod select;
+pub use select::select;
+
 pub trait MorbDataType: Send + Sync + 'static + Clone {}
 impl<T> MorbDataType for T where T: Send + Sync + 'static + Clone {}
 

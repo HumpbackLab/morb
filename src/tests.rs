@@ -253,8 +253,88 @@ fn subscriber_read_timeout_returns_message_before_timeout() {
 }
 
 #[test]
+fn select_returns_first_ready_subscriber_in_slice_order() {
+    let topic1 = Arc::new(Topic::new("test_select_ready_1".to_string(), 4, 17));
+    let topic2 = Arc::new(Topic::new("test_select_ready_2".to_string(), 4, 18));
+    let mut sub1 = topic1.create_subscriber();
+    let mut sub2 = topic2.create_subscriber();
+
+    topic1.create_publisher().publish(10_u32);
+    topic2.create_publisher().publish(20_u32);
+
+    let (index, msg) = select(&mut [&mut sub1, &mut sub2], Some(Duration::ZERO)).unwrap();
+    assert_eq!((index, msg), (0, 10));
+}
+
+#[test]
+fn select_waits_until_a_subscriber_becomes_ready() {
+    let topic1 = Arc::new(Topic::new("test_select_wait_1".to_string(), 4, 19));
+    let topic2 = Arc::new(Topic::new("test_select_wait_2".to_string(), 4, 20));
+    let mut sub1 = topic1.create_subscriber();
+    let mut sub2 = topic2.create_subscriber();
+    let start_barrier = Arc::new(Barrier::new(2));
+
+    let topic2_for_writer = topic2.clone();
+    let start_barrier_for_writer = start_barrier.clone();
+    let handle = thread::spawn(move || {
+        start_barrier_for_writer.wait();
+        thread::sleep(Duration::from_millis(20));
+        topic2_for_writer.create_publisher().publish(77_u32);
+    });
+
+    start_barrier.wait();
+    let (index, msg) = select(
+        &mut [&mut sub1, &mut sub2],
+        Some(Duration::from_millis(200)),
+    )
+    .unwrap();
+
+    assert_eq!((index, msg), (1, 77));
+    handle.join().unwrap();
+}
+
+#[test]
+fn select_times_out_when_nothing_is_ready() {
+    let topic1 = Arc::new(Topic::<u32>::new(
+        "test_select_timeout_1".to_string(),
+        4,
+        21,
+    ));
+    let topic2 = Arc::new(Topic::<u32>::new(
+        "test_select_timeout_2".to_string(),
+        4,
+        22,
+    ));
+    let mut sub1 = topic1.create_subscriber();
+    let mut sub2 = topic2.create_subscriber();
+
+    let err = select(&mut [&mut sub1, &mut sub2], Some(Duration::from_millis(10))).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn select_rejects_empty_subscriber_lists() {
+    let mut subscribers: [&mut Subscriber<u32>; 0] = [];
+    let err = select(&mut subscribers, Some(Duration::ZERO)).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn select_supports_multiple_subscribers_on_the_same_topic() {
+    let topic = Arc::new(Topic::new("test_select_same_topic".to_string(), 4, 23));
+    let publisher = topic.create_publisher();
+    let mut sub1 = topic.create_subscriber();
+    let mut sub2 = topic.create_subscriber();
+
+    publisher.publish(55_u32);
+
+    let (index, msg) = select(&mut [&mut sub1, &mut sub2], Some(Duration::ZERO)).unwrap();
+    assert_eq!((index, msg), (0, 55));
+}
+
+#[test]
 fn subscriber_read_blocking_clears_waiter_count_after_wake() {
-    let topic = Arc::new(Topic::new("test_blocking_waiter_count".to_string(), 4, 17));
+    let topic = Arc::new(Topic::new("test_blocking_waiter_count".to_string(), 4, 24));
     let start_barrier = Arc::new(Barrier::new(2));
 
     let topic_for_reader = topic.clone();
@@ -281,7 +361,7 @@ fn subscriber_read_timeout_clears_waiter_count_after_timeout() {
     let topic = Arc::new(Topic::<u32>::new(
         "test_read_timeout_waiter_cleanup".to_string(),
         4,
-        18,
+        25,
     ));
     let mut subscriber = topic.create_subscriber();
 
@@ -295,7 +375,7 @@ fn subscriber_read_timeout_clears_waiter_count_after_timeout() {
 
 #[test]
 fn cloned_publisher_publishes_to_the_same_topic() {
-    let topic = Arc::new(Topic::new("test_cloned_publisher".to_string(), 4, 19));
+    let topic = Arc::new(Topic::new("test_cloned_publisher".to_string(), 4, 26));
     let publisher = topic.create_publisher();
     let cloned_publisher = publisher.clone();
     let mut subscriber = topic.create_subscriber();
@@ -309,7 +389,7 @@ fn cloned_publisher_publishes_to_the_same_topic() {
 
 #[test]
 fn cloned_subscriber_inherits_the_current_read_cursor() {
-    let topic = Arc::new(Topic::new("test_cloned_subscriber".to_string(), 4, 20));
+    let topic = Arc::new(Topic::new("test_cloned_subscriber".to_string(), 4, 27));
     let publisher = topic.create_publisher();
     let mut subscriber = topic.create_subscriber();
 
