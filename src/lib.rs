@@ -1,7 +1,4 @@
-//! `morb` is a lightweight in-process publish/subscribe library for Rust.
-//!
-//! It provides named topics, fixed-size message retention via a ring buffer,
-//! and poll-based notifications built on `mio` and `eventfd`.
+#![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
 use std::mem::MaybeUninit;

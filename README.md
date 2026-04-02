@@ -4,11 +4,25 @@
 
 The current implementation targets Linux.
 
+## Model
+
+`morb` has three layers of usage:
+
+- `Publisher::publish` writes data into a named topic.
+- `Subscriber` reads data from that topic in publish order.
+- `TopicPoller` and `select` help wait on one or more topics when polling is needed.
+
+For most users, the simplest path is:
+
+1. create a topic
+2. create a publisher and subscriber
+3. publish with `publish`
+4. read with `check_update_and_copy` or `read`
+
 ## Quick Start
 
 ```rust
-use morb::{create_topic, TopicPoller};
-use std::time::Duration;
+use morb::create_topic;
 
 fn main() -> std::io::Result<()> {
     let topic = create_topic::<u32>("numbers".to_string(), 16)?;
@@ -16,26 +30,20 @@ fn main() -> std::io::Result<()> {
     let mut subscriber = topic.create_subscriber();
 
     publisher.publish(42);
-    assert!(subscriber.check_update());
     assert_eq!(subscriber.check_update_and_copy(), Some(42));
-
-    let mut poller = TopicPoller::new();
-    poller.add_topic(&topic)?;
-
-    publisher.publish(100);
-    poller.wait(Some(Duration::from_millis(100)))?;
-
-    for token in poller.iter() {
-        if token == topic.token() {
-            println!("{} updated", topic.name());
-        }
-    }
 
     Ok(())
 }
 ```
 
+Use `check_update_and_copy` when you already know the topic may have data and want a non-blocking read.
+
 ## Blocking Read
+
+Use `Subscriber::read` when you want the subscriber to wait until data is available.
+
+- `read(None)` waits indefinitely
+- `read(Some(duration))` waits up to the given timeout
 
 ```rust
 use morb::create_topic;
@@ -55,7 +63,11 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-## Select Across Subscribers
+## Waiting On Multiple Topics
+
+Use `select` when one thread is waiting on multiple subscribers and wants the first ready message.
+
+The function form is the core API. It returns the index of the ready subscriber together with the message.
 
 ```rust
 use morb::{create_topic, select};
@@ -72,11 +84,56 @@ fn main() -> std::io::Result<()> {
     let (index, msg) = select(&mut [&mut sub1, &mut sub2], Some(Duration::from_millis(10)))?;
     assert_eq!((index, msg), (1, 42));
 
+    Ok(())
+}
+```
+
+Use `select!` only when you want branch-style syntax on top of that same behavior.
+
+```rust
+use morb::create_topic;
+
+fn main() -> std::io::Result<()> {
+    let topic1 = create_topic::<u32>("select_macro_1".to_string(), 16)?;
+    let topic2 = create_topic::<u32>("select_macro_2".to_string(), 16)?;
+    let mut sub1 = topic1.create_subscriber();
+    let mut sub2 = topic2.create_subscriber();
+
+    topic2.create_publisher().publish(42);
+
     let branch_result = morb::select! {
         msg = sub1 => { msg + 1 },
         msg = sub2 => { msg + 2 },
     }?;
     assert_eq!(branch_result, 44);
+
+    Ok(())
+}
+```
+
+## Polling
+
+Use `TopicPoller` when you want token-based polling instead of directly reading from subscribers.
+
+```rust
+use morb::{create_topic, TopicPoller};
+use std::time::Duration;
+
+fn main() -> std::io::Result<()> {
+    let topic = create_topic::<u32>("numbers_poll".to_string(), 16)?;
+    let publisher = topic.create_publisher();
+
+    let mut poller = TopicPoller::new();
+    poller.add_topic(&topic)?;
+
+    publisher.publish(100);
+    poller.wait(Some(Duration::from_millis(100)))?;
+
+    for token in poller.iter() {
+        if token == topic.token() {
+            println!("{} updated", topic.name());
+        }
+    }
 
     Ok(())
 }
@@ -117,4 +174,4 @@ Notes:
 - `blocking_poll` is capped at 50,000 waits to keep runtime practical.
 - Results are machine-dependent and should be used for relative comparisons, not absolute guarantees.
 
-See [RELEASE_NOTES.md](/home/ncer/morb/RELEASE_NOTES.md) for a short version history.
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for a short version history.
